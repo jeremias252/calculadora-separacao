@@ -6,7 +6,7 @@ import pypdf
 # Configuração da página
 st.set_page_config(page_title="Calculadora de Tempo de Separação", layout="wide")
 
-st.title("⏱️ Calculadora de Tempo de Separação (PDF Real)")
+st.title("⏱️ Calculadora de Tempo de Separação (Versão Ultra-Resiliente)")
 st.markdown("Faça o upload do seu relatório em PDF para calcular o tempo estimado de separação por funcionário.")
 
 # 1. BARRA LATERAL: Configuração de Tempos por Categoria
@@ -30,98 +30,80 @@ if arquivo_pdf is not None:
         for page in reader.pages:
             texto_completo += page.extract_text() + "\n"
         
-        # Busca global e ultra flexível por "X pedidos Y" em todo o texto (ignora quebras de linha e falta de espaços)
-        padrao_separador = r"(\d+)\s*pedi[a-z]*\s*(\d+)"
-        matches = list(re.finditer(padrao_separador, texto_completo, re.IGNORECASE))
+        # ABA DE DEPURAÇÃO (Ajuda a descobrir se o PDF veio como imagem ou texto bagunçado)
+        with st.expander("🔍 Ver texto extraído do PDF (Clique para expandir/ocultar)"):
+            if texto_completo.strip():
+                st.text(texto_completo[:2000] + "\n\n[... Mostrando os primeiros 2000 caracteres ...]")
+            else:
+                st.error("❌ O texto extraído está COMPLETAMENTE VAZIO! Este PDF foi escaneado como imagem ou foto? O sistema precisa de PDFs gerados diretamente pelo sistema com texto selecionável.")
+
+        if not texto_completo.strip():
+            st.stop()
+
+        # NORMALIZAÇÃO DO TEXTO: Junta tudo em uma linha contínua, eliminando quebras de linha invisíveis
+        texto_sub = re.sub(r'\s+', ' ', texto_completo)
+        
+        # Padrão flexível para encontrar os blocos de cada pessoa: "Nome X pedidos Y un"
+        padrao = r"([A-Za-zÀ-ÿ\s\.]+?)\s*(\d+)\s*pedidos\s*(\d+)\s*un"
+        matches = list(re.finditer(padrao, texto_sub, re.IGNORECASE))
         
         dados_finais = []
         
         for idx, match in enumerate(matches):
-            qtd_pedidos = int(match.group(1))
-            total_unidades = int(match.group(2))
+            nome_cru = match.group(1).strip()
             
-            # Filtra falsos positivos (como números de anos ou códigos operacionais muito altos)
-            if qtd_pedidos > 500 or total_unidades > 5000:
+            # Limpeza do nome tirando restos de cabeçalhos das tabelas
+            nome = nome_cru
+            for termo in ["detalhado por pessoa", "resumo por pessoa", "unidades", "pedidos", "pessoa", "montagem", "conferência"]:
+                if termo in nome.lower():
+                    partes = re.split(termo, nome, flags=re.IGNORECASE)
+                    nome = partes[-1].strip()
+            
+            # Mantém apenas letras no nome
+            nome = re.sub(r'[^a-zA-ZÀ-ÿ\s]', '', nome).strip().title()
+            
+            if not nome or len(nome) < 3 or nome.lower() in ["item", "qtd", "pedido"]:
                 continue
                 
-            # Captura o texto anterior para descobrir o nome do funcionário
-            start_pos = match.start()
-            texto_anterior = texto_completo[max(0, start_pos-150):start_pos]
-            linhas_anteriores = [l.strip() for l in texto_anterior.split("\n") if l.strip()]
+            qtd_pedidos = int(match.group(2))
+            total_unidades = int(match.group(3))
             
-            nome = ""
-            if linhas_anteriores:
-                for linha_ant in reversed(linhas_anteriores):
-                    linha_ant_clean = linha_ant.replace("Detalhado por pessoa", "").replace("Resumo por pessoa", "").strip()
-                    if linha_ant_clean and not any(w in linha_ant_clean.lower() for w in ["pedido", "item", "qtd", "|", "unidades", "conferência", "montagem"]):
-                        nome = re.sub(r'[^a-zA-ZÀ-ÿ\s]', '', linha_ant_clean).strip().title()
-                        if nome and len(nome) > 3:
-                            break
+            # Isola os produtos pertencentes a este funcionário específico
+            start_pos = match.end()
+            end_pos = matches[idx+1].start() if idx + 1 < len(matches) else len(texto_sub)
+            bloco_texto = texto_sub[start_pos:end_pos].lower()
             
-            if not nome:
-                nome = f"Separador Desconhecido {idx + 1}"
-                
-            # Isola o bloco de texto de itens deste funcionário
-            end_pos = matches[idx+1].start() if idx + 1 < len(matches) else len(texto_completo)
-            bloco_texto = texto_completo[match.end():end_pos]
+            # Divide os itens usando o número do pedido (5 a 7 dígitos) como separador lógico
+            itens = re.split(r'\b\d{5,7}\b', bloco_texto)
             
-            # Varredura inteligente de produtos e quantidades por proximidade linear
-            linhas_bloco = bloco_texto.split("\n")
-            detected_types = []
-            detected_quantities = []
+            t_count, c_count, r_count, o_count = 0, 0, 0, 0
             
-            for linha_bloco in linhas_bloco:
-                l_lower = linha_bloco.lower().strip()
-                if not l_lower or any(w in l_lower for w in ["pedido", "item", "qtd", "resumo", "detalhado"]):
+            for item in itens:
+                if not item.strip():
                     continue
                 
-                # Identifica o tipo do produto por palavra-chave
-                tipo = None
-                if "torre" in l_lower:
-                    tipo = "torre"
-                elif "caixa" in l_lower:
-                    tipo = "caixa"
-                elif "régua" in l_lower or "regua" in l_lower:
-                    tipo = "régua"
-                elif any(w in l_lower for w in ["módulo", "modulo", "rj-45", "rede"]):
-                    tipo = "módulo"
-                    
-                if tipo:
-                    detected_types.append(tipo)
-                
-                # Identifica quantidades isoladas na linha ou coladas no final do texto
-                clean_line = linha_bloco.replace("|", "").strip()
-                if clean_line.isdigit() and len(clean_line) < 4:
-                    detected_quantities.append(int(clean_line))
+                # Captura a quantidade no fim da descrição do item
+                match_qtd = re.search(r'(?:\|\s*|\s+)(\d+)\s*$', item.strip())
+                if match_qtd:
+                    qtd_linha = int(match_qtd.group(1))
                 else:
-                    match_qtd = re.search(r"(?:\|\s*|\s+)(\d+)\s*$", linha_bloco.strip())
-                    if match_qtd:
-                        val_qtd = int(match_qtd.group(1))
-                        if val_qtd < 1000: # Evita confundir com códigos de produtos
-                            detected_quantities.append(val_qtd)
+                    qtd_linha = 1
+                
+                # Filtra por palavras-chave
+                if "torre" in item:
+                    t_count += qtd_linha
+                elif "caixa" in item:
+                    c_count += qtd_linha
+                elif "régua" in item or "regua" in item:
+                    r_count += qtd_linha
+                elif any(w in item for w in ["módulo", "modulo", "rj-45", "rede"]):
+                    o_count += qtd_linha
             
-            # Consolida dados usando alinhamento inteligente de listas paralelas (resolve colunas desalinhadas)
-            t_count, c_count, r_count, o_count = 0, 0, 0, 0
-            for t, q in zip(detected_types, detected_quantities):
-                if t == "torre": t_count += q
-                elif t == "caixa": c_count += q
-                elif t == "régua": r_count += q
-                elif t == "módulo": o_count += q
-            
-            # Ajuste Fino de segurança: Garante que o total distribuído bata 100% com o cabeçalho oficial do PDF
+            # Força o ajuste matemático para bater com o cabeçalho do PDF
             total_detectado = t_count + c_count + r_count + o_count
             if total_detectado != total_unidades:
                 if total_detectado == 0:
-                    if len(detected_types) > 0:
-                        share = total_unidades // len(detected_types)
-                        for t in detected_types:
-                            if t == "torre": t_count += share
-                            elif t == "caixa": c_count += share
-                            elif t == "régua": r_count += share
-                            elif t == "módulo": o_count += share
-                        c_count += (total_unidades - (t_count + c_count + r_count + o_count))
-                    else:
-                        c_count = total_unidades
+                    c_count = total_unidades  
                 else:
                     fator = total_unidades / total_detectado
                     t_count = round(t_count * fator)
@@ -129,7 +111,7 @@ if arquivo_pdf is not None:
                     r_count = round(r_count * fator)
                     o_count = total_unidades - (t_count + c_count + r_count)
             
-            # Cálculo de tempos baseado nos inputs do painel lateral
+            # Contabilidade dos tempos
             tempo_total_minutos = (c_count * tempo_caixa) + (t_count * tempo_torre) + (r_count * tempo_regua) + (o_count * tempo_outros)
             tempo_amigavel = f"{int(tempo_total_minutos // 60)}h {int(tempo_total_minutos % 60)}m" if tempo_total_minutos >= 60 else f"{int(tempo_total_minutos)} min"
             
@@ -146,7 +128,6 @@ if arquivo_pdf is not None:
             
         df_resultado = pd.DataFrame(dados_finais)
         
-        # Elimina possíveis duplicatas geradas pela tabela de resumo do topo do PDF
         if not df_resultado.empty:
             df_resultado = df_resultado.drop_duplicates(subset=["Separador"], keep="last")
             
@@ -174,7 +155,7 @@ if arquivo_pdf is not None:
             st.subheader("📈 Distribuição da Carga de Trabalho (em minutos)")
             st.bar_chart(data=df_resultado, x="Separador", y="Tempo_Minutos")
         else:
-            st.warning("⚠️ Não encontramos dados de separadores no formato esperado dentro do PDF.")
+            st.warning("⚠️ Não encontramos dados de separadores no formato esperado dentro do PDF. Por favor, clique na barra de ferramentas 'Ver texto extraído do PDF' logo acima para ver o que há de errado.")
             
     except Exception as e:
         st.error(f"Erro ao ler o arquivo PDF: {e}")
