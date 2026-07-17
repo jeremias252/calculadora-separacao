@@ -9,8 +9,6 @@ st.set_page_config(page_title="Calculadora de Tempo de Separação", layout="wid
 st.title("⏱️ Calculadora de Tempo de Separação (PDF Real)")
 st.markdown("Faça o upload do seu relatório em PDF para calcular o tempo estimado de separação por funcionário.")
 
----
-
 # 1. BARRA LATERAL: Configuração de Tempos por Categoria
 st.sidebar.header("⚙️ Configuração de Tempos")
 st.sidebar.markdown("Defina quantos **minutos** leva para separar 1 unidade de cada categoria:")
@@ -19,8 +17,6 @@ tempo_caixa = st.sidebar.number_input("Caixa de Tomada (minutos)", min_value=0.5
 tempo_torre = st.sidebar.number_input("Torre de Tomada (minutos)", min_value=0.5, value=4.0, step=0.5)
 tempo_regua = st.sidebar.number_input("Régua de Tomada (minutos)", min_value=0.5, value=2.5, step=0.5)
 tempo_outros = st.sidebar.number_input("Módulos / Outros (minutos)", min_value=0.5, value=1.0, step=0.5)
-
----
 
 # 2. ÁREA PRINCIPAL: Upload do PDF
 st.subheader("📁 Upload do Relatório Real")
@@ -71,7 +67,7 @@ if arquivo_pdf is not None:
                 parts = linha.split('|')
                 if len(parts) >= 2 and parts[-1].strip().isdigit():
                     qtd_linha = int(parts[-1].strip())
-                elif l_idx + 1 < len(linhas) and linhas[l_idx+1].strip().isdigit():
+                elif l_idx + 1 < len(linhas) and lines[l_idx+1].strip().isdigit():
                     qtd_linha = int(linhas[l_idx+1].strip())
                 
                 # Classifica por palavra-chave
@@ -123,8 +119,6 @@ if arquivo_pdf is not None:
         if not df_resultado.empty:
             st.success("✅ Relatório processado com sucesso!")
             
-            ---
-            
             # 3. EXIBIÇÃO DE MÉTRICAS GERAIS
             st.subheader("📊 Resumo Geral da Operação")
             col1, col2, col3 = st.columns(3)
@@ -135,8 +129,6 @@ if arquivo_pdf is not None:
             with col3:
                 tempo_geral = df_resultado["Tempo_Minutos"].sum()
                 st.metric("Tempo Total de Trabalho Estimado", f"{int(tempo_geral // 60)}h {int(tempo_geral % 60)}m")
-            
-            ---
             
             # 4. TABELA DE DETALHES
             st.subheader("📋 Tempo e Produtividade por Separador")
