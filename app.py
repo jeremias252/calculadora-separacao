@@ -30,57 +30,91 @@ if arquivo_pdf is not None:
         for page in reader.pages:
             texto_completo += page.extract_text() + "\n"
         
-        # Encontra os separadores e seus totais usando o padrão do relatório: "Nome X pedidos Y un."
-        padrao_separador = r"([A-ZÀ-ÿa-z\s]+?)\s+(\d+)\s+pedidos\s+(\d+)\s+un"
-        matches_iter = list(re.finditer(padrao_separador, texto_completo, re.IGNORECASE))
+        # Quebra o texto em linhas para uma varredura resiliente
+        linhas = texto_completo.split("\n")
+        secoes_separadores = []
+        
+        # Passo 1: Identificar as linhas de início de cada separador
+        for i, linha in enumerate(linhas):
+            match = re.search(r"(\d+)\s+pedidos\s+(\d+)\s+un", linha, re.IGNORECASE)
+            if match:
+                qtd_pedidos = int(match.group(1))
+                total_unidades = int(match.group(2))
+                
+                # Descobre o nome do separador (na mesma linha ou na anterior)
+                texto_antes = linha[:match.start()].strip()
+                if len(texto_antes) > 3:
+                    nome = texto_antes
+                else:
+                    # Busca nas linhas anteriores por um nome válido
+                    nome = ""
+                    for j in range(i-1, -1, -1):
+                        linha_anterior = linhas[j].strip()
+                        if linha_anterior and not any(w in linha_anterior.lower() for w in ["pedido", "item", "qtd", "|", "unidades"]):
+                            linha_anterior = linha_anterior.replace("Detalhado por pessoa", "").replace("Resumo por pessoa", "").strip()
+                            if linha_anterior:
+                                nome = linha_anterior
+                                break
+                
+                # Limpeza final do nome
+                nome = re.sub(r'[^a-zA-ZÀ-ÿ\s]', '', nome).strip().title()
+                if not nome:
+                    nome = f"Separador Desconhecido ({qtd_pedidos} ped)"
+                    
+                secoes_separadores.append({
+                    "nome": nome,
+                    "pedidos": qtd_pedidos,
+                    "unidades": total_unidades,
+                    "linha_inicial": i
+                })
         
         dados_finais = []
         
-        for idx, match in enumerate(matches_iter):
-            nome_cru = match.group(1)
-            # Limpa sujeiras de cabeçalho do PDF
-            nome = nome_cru.replace("Detalhado por pessoa", "").replace("Resumo por pessoa", "").strip().title()
+        # Passo 2: Processar os itens de cada secao encontrada
+        for idx, sec in enumerate(secoes_separadores):
+            start_l = sec["linha_inicial"] + 1
+            end_l = secoes_separadores[idx+1]["linha_inicial"] if idx + 1 < len(secoes_separadores) else len(linhas)
             
-            # Filtra linhas falsas ou cabeçalhos da tabela
-            if "Pessoa" in nome or "Pedido" in nome or not nome:
-                continue
-                
-            qtd_pedidos = int(match.group(2))
-            total_unidades = int(match.group(3))
-            
-            # Isola o bloco de texto específico deste separador
-            start = match.end()
-            end = matches_iter[idx+1].start() if idx + 1 < len(matches_iter) else len(texto_completo)
-            bloco_texto = texto_completo[start:end].lower()
-            
-            # Contagem inteligente por palavras-chave dentro do bloco do separador
-            linhas = bloco_texto.split('\n')
+            bloco_linhas = linhas[start_l:end_l]
             t_count, c_count, r_count, o_count = 0, 0, 0, 0
             
-            for l_idx, linha in enumerate(linhas):
-                linha = linha.strip()
-                if not linha:
+            for l_idx, l in enumerate(bloco_linhas):
+                l_lower = l.lower().strip()
+                if not l_lower or any(w in l_lower for w in ["pedido", "item", "qtd"]):
                     continue
                 
-                # Define a quantidade da linha (procura por número no fim ou na linha seguinte se quebrado)
-                qtd_linha = 1
-                parts = linha.split('|')
-                if len(parts) >= 2 and parts[-1].strip().isdigit():
-                    qtd_linha = int(parts[-1].strip())
-                elif l_idx + 1 < len(linhas) and lines[l_idx+1].strip().isdigit():
-                    qtd_linha = int(linhas[l_idx+1].strip())
+                # Ignora linhas que são apenas números isolados (já capturadas pelo lookahead anterior)
+                if l_lower.isdigit():
+                    continue
                 
-                # Classifica por palavra-chave
-                if "torre" in linha:
+                # Tenta capturar a quantidade do produto na linha atual ou na próxima
+                qtd_linha = 0
+                parts = [p.strip() for p in l.split("|")]
+                
+                if len(parts) >= 2 and parts[-1].isdigit():
+                    qtd_linha = int(parts[-1])
+                else:
+                    match_fim_num = re.search(r"\b(\d+)$", l.strip())
+                    if match_fim_num:
+                        qtd_linha = int(match_fim_num.group(1))
+                    elif l_idx + 1 < len(bloco_linhas) and bloco_linhas[l_idx+1].strip().isdigit():
+                        qtd_linha = int(bloco_linhas[l_idx+1].strip())
+                
+                if qtd_linha == 0:
+                    qtd_linha = 1 # Fallback padrão
+                
+                # Classificação por palavra-chave do produto
+                if "torre" in l_lower:
                     t_count += qtd_linha
-                elif "caixa" in linha:
+                elif "caixa" in l_lower:
                     c_count += qtd_linha
-                elif "régua" in linha or "regua" in linha:
+                elif "régua" in l_lower or "regua" in l_lower:
                     r_count += qtd_linha
-                elif "módulo" in linha or "modulo" in linha:
+                elif any(w in l_lower for w in ["módulo", "modulo", "rj-45", "rede"]):
                     o_count += qtd_linha
             
-            # Ajuste proporcional: Garante que a soma das categorias bata EXATAMENTE com o total do PDF
+            # Ajuste Fino: Força a soma das categorias a bater com o total declarado no PDF
+            total_unidades = sec["unidades"]
             total_detectado = t_count + c_count + r_count + o_count
             if total_detectado > 0 and total_detectado != total_unidades:
                 fator = total_unidades / total_detectado
@@ -89,27 +123,19 @@ if arquivo_pdf is not None:
                 r_count = round(r_count * fator)
                 o_count = total_unidades - (t_count + c_count + r_count)
             elif total_detectado == 0:
-                c_count = total_unidades # Fallback de segurança
-                
-            # Calcula o tempo total deste funcionário baseado nas regras da barra lateral
-            tempo_total_minutos = (
-                (c_count * tempo_caixa) + 
-                (t_count * tempo_torre) + 
-                (r_count * tempo_regua) + 
-                (o_count * tempo_outros)
-            )
+                c_count = total_unidades
             
-            # Formata o tempo para exibição amigável (ex: 1h 20m)
+            # Cálculo de tempo
+            tempo_total_minutos = (c_count * tempo_caixa) + (t_count * tempo_torre) + (r_count * tempo_regua) + (o_count * tempo_outros)
             tempo_amigavel = f"{int(tempo_total_minutos // 60)}h {int(tempo_total_minutos % 60)}m" if tempo_total_minutos >= 60 else f"{int(tempo_total_minutos)} min"
             
             dados_finais.append({
-                "Separador": nome,
-                "Pedidos": qtd_pedidos,
+                "Separador": sec["nome"],
+                "Pedidos": sec["pedidos"],
                 "Total Unidades": total_unidades,
                 "Caixas": c_count,
                 "Torres": t_count,
                 "Réguas": r_count,
-                "Módulos/Outros": o_count,
                 "Tempo_Minutos": tempo_total_minutos,
                 "Tempo Estimado": tempo_amigavel
             })
