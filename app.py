@@ -30,108 +30,112 @@ if arquivo_pdf is not None:
         for page in reader.pages:
             texto_completo += page.extract_text() + "\n"
         
-        # Quebra o texto em linhas para uma varredura resiliente
-        linhas = texto_completo.split("\n")
-        secoes_separadores = []
-        
-        # Passo 1: Identificar as linhas de início de cada separador
-        for i, linha in enumerate(linhas):
-            match = re.search(r"(\d+)\s+pedidos\s+(\d+)\s+un", linha, re.IGNORECASE)
-            if match:
-                qtd_pedidos = int(match.group(1))
-                total_unidades = int(match.group(2))
-                
-                # Descobre o nome do separador (na mesma linha ou na anterior)
-                texto_antes = linha[:match.start()].strip()
-                if len(texto_antes) > 3:
-                    nome = texto_antes
-                else:
-                    # Busca nas linhas anteriores por um nome válido
-                    nome = ""
-                    for j in range(i-1, -1, -1):
-                        linha_anterior = linhas[j].strip()
-                        if linha_anterior and not any(w in linha_anterior.lower() for w in ["pedido", "item", "qtd", "|", "unidades"]):
-                            linha_anterior = linha_anterior.replace("Detalhado por pessoa", "").replace("Resumo por pessoa", "").strip()
-                            if linha_anterior:
-                                nome = linha_anterior
-                                break
-                
-                # Limpeza final do nome
-                nome = re.sub(r'[^a-zA-ZÀ-ÿ\s]', '', nome).strip().title()
-                if not nome:
-                    nome = f"Separador Desconhecido ({qtd_pedidos} ped)"
-                    
-                secoes_separadores.append({
-                    "nome": nome,
-                    "pedidos": qtd_pedidos,
-                    "unidades": total_unidades,
-                    "linha_inicial": i
-                })
+        # Busca global e ultra flexível por "X pedidos Y" em todo o texto (ignora quebras de linha e falta de espaços)
+        padrao_separador = r"(\d+)\s*pedi[a-z]*\s*(\d+)"
+        matches = list(re.finditer(padrao_separador, texto_completo, re.IGNORECASE))
         
         dados_finais = []
         
-        # Passo 2: Processar os itens de cada secao encontrada
-        for idx, sec in enumerate(secoes_separadores):
-            start_l = sec["linha_inicial"] + 1
-            end_l = secoes_separadores[idx+1]["linha_inicial"] if idx + 1 < len(secoes_separadores) else len(linhas)
+        for idx, match in enumerate(matches):
+            qtd_pedidos = int(match.group(1))
+            total_unidades = int(match.group(2))
             
-            bloco_linhas = linhas[start_l:end_l]
-            t_count, c_count, r_count, o_count = 0, 0, 0, 0
+            # Filtra falsos positivos (como números de anos ou códigos operacionais muito altos)
+            if qtd_pedidos > 500 or total_unidades > 5000:
+                continue
+                
+            # Captura o texto anterior para descobrir o nome do funcionário
+            start_pos = match.start()
+            texto_anterior = texto_completo[max(0, start_pos-150):start_pos]
+            linhas_anteriores = [l.strip() for l in texto_anterior.split("\n") if l.strip()]
             
-            for l_idx, l in enumerate(bloco_linhas):
-                l_lower = l.lower().strip()
-                if not l_lower or any(w in l_lower for w in ["pedido", "item", "qtd"]):
+            nome = ""
+            if linhas_anteriores:
+                for linha_ant in reversed(linhas_anteriores):
+                    linha_ant_clean = linha_ant.replace("Detalhado por pessoa", "").replace("Resumo por pessoa", "").strip()
+                    if linha_ant_clean and not any(w in linha_ant_clean.lower() for w in ["pedido", "item", "qtd", "|", "unidades", "conferência", "montagem"]):
+                        nome = re.sub(r'[^a-zA-ZÀ-ÿ\s]', '', linha_ant_clean).strip().title()
+                        if nome and len(nome) > 3:
+                            break
+            
+            if not nome:
+                nome = f"Separador Desconhecido {idx + 1}"
+                
+            # Isola o bloco de texto de itens deste funcionário
+            end_pos = matches[idx+1].start() if idx + 1 < len(matches) else len(texto_completo)
+            bloco_texto = texto_completo[match.end():end_pos]
+            
+            # Varredura inteligente de produtos e quantidades por proximidade linear
+            linhas_bloco = bloco_texto.split("\n")
+            detected_types = []
+            detected_quantities = []
+            
+            for linha_bloco in linhas_bloco:
+                l_lower = linha_bloco.lower().strip()
+                if not l_lower or any(w in l_lower for w in ["pedido", "item", "qtd", "resumo", "detalhado"]):
                     continue
                 
-                # Ignora linhas que são apenas números isolados (já capturadas pelo lookahead anterior)
-                if l_lower.isdigit():
-                    continue
-                
-                # Tenta capturar a quantidade do produto na linha atual ou na próxima
-                qtd_linha = 0
-                parts = [p.strip() for p in l.split("|")]
-                
-                if len(parts) >= 2 and parts[-1].isdigit():
-                    qtd_linha = int(parts[-1])
-                else:
-                    match_fim_num = re.search(r"\b(\d+)$", l.strip())
-                    if match_fim_num:
-                        qtd_linha = int(match_fim_num.group(1))
-                    elif l_idx + 1 < len(bloco_linhas) and bloco_linhas[l_idx+1].strip().isdigit():
-                        qtd_linha = int(bloco_linhas[l_idx+1].strip())
-                
-                if qtd_linha == 0:
-                    qtd_linha = 1 # Fallback padrão
-                
-                # Classificação por palavra-chave do produto
+                # Identifica o tipo do produto por palavra-chave
+                tipo = None
                 if "torre" in l_lower:
-                    t_count += qtd_linha
+                    tipo = "torre"
                 elif "caixa" in l_lower:
-                    c_count += qtd_linha
+                    tipo = "caixa"
                 elif "régua" in l_lower or "regua" in l_lower:
-                    r_count += qtd_linha
+                    tipo = "régua"
                 elif any(w in l_lower for w in ["módulo", "modulo", "rj-45", "rede"]):
-                    o_count += qtd_linha
+                    tipo = "módulo"
+                    
+                if tipo:
+                    detected_types.append(tipo)
+                
+                # Identifica quantidades isoladas na linha ou coladas no final do texto
+                clean_line = linha_bloco.replace("|", "").strip()
+                if clean_line.isdigit() and len(clean_line) < 4:
+                    detected_quantities.append(int(clean_line))
+                else:
+                    match_qtd = re.search(r"(?:\|\s*|\s+)(\d+)\s*$", linha_bloco.strip())
+                    if match_qtd:
+                        val_qtd = int(match_qtd.group(1))
+                        if val_qtd < 1000: # Evita confundir com códigos de produtos
+                            detected_quantities.append(val_qtd)
             
-            # Ajuste Fino: Força a soma das categorias a bater com o total declarado no PDF
-            total_unidades = sec["unidades"]
+            # Consolida dados usando alinhamento inteligente de listas paralelas (resolve colunas desalinhadas)
+            t_count, c_count, r_count, o_count = 0, 0, 0, 0
+            for t, q in zip(detected_types, detected_quantities):
+                if t == "torre": t_count += q
+                elif t == "caixa": c_count += q
+                elif t == "régua": r_count += q
+                elif t == "módulo": o_count += q
+            
+            # Ajuste Fino de segurança: Garante que o total distribuído bata 100% com o cabeçalho oficial do PDF
             total_detectado = t_count + c_count + r_count + o_count
-            if total_detectado > 0 and total_detectado != total_unidades:
-                fator = total_unidades / total_detectado
-                t_count = round(t_count * fator)
-                c_count = round(c_count * fator)
-                r_count = round(r_count * fator)
-                o_count = total_unidades - (t_count + c_count + r_count)
-            elif total_detectado == 0:
-                c_count = total_unidades
+            if total_detectado != total_unidades:
+                if total_detectado == 0:
+                    if len(detected_types) > 0:
+                        share = total_unidades // len(detected_types)
+                        for t in detected_types:
+                            if t == "torre": t_count += share
+                            elif t == "caixa": c_count += share
+                            elif t == "régua": r_count += share
+                            elif t == "módulo": o_count += share
+                        c_count += (total_unidades - (t_count + c_count + r_count + o_count))
+                    else:
+                        c_count = total_unidades
+                else:
+                    fator = total_unidades / total_detectado
+                    t_count = round(t_count * fator)
+                    c_count = round(c_count * fator)
+                    r_count = round(r_count * fator)
+                    o_count = total_unidades - (t_count + c_count + r_count)
             
-            # Cálculo de tempo
+            # Cálculo de tempos baseado nos inputs do painel lateral
             tempo_total_minutos = (c_count * tempo_caixa) + (t_count * tempo_torre) + (r_count * tempo_regua) + (o_count * tempo_outros)
             tempo_amigavel = f"{int(tempo_total_minutos // 60)}h {int(tempo_total_minutos % 60)}m" if tempo_total_minutos >= 60 else f"{int(tempo_total_minutos)} min"
             
             dados_finais.append({
-                "Separador": sec["nome"],
-                "Pedidos": sec["pedidos"],
+                "Separador": nome,
+                "Pedidos": qtd_pedidos,
                 "Total Unidades": total_unidades,
                 "Caixas": c_count,
                 "Torres": t_count,
@@ -142,7 +146,10 @@ if arquivo_pdf is not None:
             
         df_resultado = pd.DataFrame(dados_finais)
         
+        # Elimina possíveis duplicatas geradas pela tabela de resumo do topo do PDF
         if not df_resultado.empty:
+            df_resultado = df_resultado.drop_duplicates(subset=["Separador"], keep="last")
+            
             st.success("✅ Relatório processado com sucesso!")
             
             # 3. EXIBIÇÃO DE MÉTRICAS GERAIS
